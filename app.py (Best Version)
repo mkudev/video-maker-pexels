@@ -16,15 +16,15 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-PEXELS_API_KEY = "qzV2sjHrGTLBFPd9pzWika84j3ehYJ1rnvXaG2DREBQq9uw6iZq6h9aV"
+PEXELS_API_KEY = "YOU API KEY"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
 TAGS_PREDEFINIDOS = [
-    "cosmos","galaxia","islam","judaismo","manipulation","allah","ancient","paranoid","god","el coran","arabe",
-"mezquita","marruecos","desert","worship","street",
-"universo","estrellas","religión","fe","cultura","sagrado","misticismo","profeta","oración","tradición",
-"espiritualidad","mundo","historia","moralidad","simbología","meditación","paz","comunidad","ritual","sagrado" 
+    "cosmos","galaxia","television","social networks","manipulation","slaves","ancient","paranoid","god","el coran","arabe",
+"locutor","youtuber","ciudad","city","street",
+"ansiedad","radio","internet","atencion","","presentador","manifestacion","streaming","podcast","miedo",
+"paranoia","mundo","borregos","hidden secret","politicos","illuminati","apocalipsis" 
 ]
 
 VOICE_LIST = [
@@ -68,7 +68,7 @@ async def generate_voice(text, voice, output_path):
     except Exception:
         return False
 
-def search_videos(tag, max_results=35):
+def search_videos(tag, max_results=55):
     start = time.time()
     headers = {"Authorization": PEXELS_API_KEY}
     params = {"query": tag, "per_page": max_results}
@@ -200,7 +200,7 @@ def create_video_part(voice_duration, temp_dir, tags):
     
     all_video_urls = []
     for tag in tags:
-        urls = search_videos(tag, max_results=85)
+        urls = search_videos(tag, max_results=25)
         all_video_urls.extend(urls)
     if not all_video_urls:
         return None, "❌ No se encontraron clips válidos"
