@@ -1,22 +1,32 @@
 import os
-import time
+import threading
 import uuid
+import tempfile
 import shutil
 import random
-import asyncio
-import logging
-import tempfile
-import subprocess
-import threading
-import requests
-from flask import Flask, request, redirect, url_for, render_template_string, send_file
+import time
 from datetime import datetime
-from pydub import AudioSegment
+from flask import Flask, request, render_template_string, send_file, redirect, url_for
+import asyncio
 import edge_tts
+import requests
+import subprocess
+from pydub import AudioSegment
+import logging
 
-# ==========================================
-# CONFIGURACIÓN DE VOCES
-# ==========================================
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+
+PEXELS_API_KEY = "YOU API KEY"
+OUTPUT_FOLDER = "outputs"
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+TAGS_PREDEFINIDOS = [
+    "cosmos","galaxia","television","social networks","manipulation","slaves","ancient","paranoid","god","el coran","arabe",
+"locutor","youtuber","ciudad","city","street",
+"ansiedad","radio","internet","atencion","","presentador","manifestacion","streaming","podcast","miedo",
+"paranoia","mundo","borregos","hidden secret","politicos","illuminati","apocalipsis" 
+]
+
 VOICE_LIST = [
     "es-ES-ElviraNeural",
     "es-AR-TomasNeural",
