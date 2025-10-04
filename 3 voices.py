@@ -34,13 +34,6 @@ VOICE_LIST = [
 ]
 DEFAULT_VOICE = "es-ES-ElviraNeural"
 
-OUTPUT_FOLDER = "output"
-PEXELS_API_KEY = "TU_API_KEY_AQUI"
-TAGS_PREDEFINIDOS = ["naturaleza", "ciudad", "personas", "tecnología", "viajes"]
-
-if not os.path.exists(OUTPUT_FOLDER):
-    os.makedirs(OUTPUT_FOLDER)
-
 # ==========================================
 # LIMPIEZA DE ARCHIVOS ANTIGUOS
 # ==========================================
