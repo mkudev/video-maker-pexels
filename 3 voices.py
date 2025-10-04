@@ -1,0 +1,536 @@
+import os
+import time
+import uuid
+import shutil
+import random
+import asyncio
+import logging
+import tempfile
+import subprocess
+import threading
+import requests
+from flask import Flask, request, redirect, url_for, render_template_string, send_file
+from datetime import datetime
+from pydub import AudioSegment
+import edge_tts
+
+# ==========================================
+# CONFIGURACIÓN DE VOCES
+# ==========================================
+VOICE_LIST = [
+    "es-ES-ElviraNeural",
+    "es-AR-TomasNeural",
+    "es-CO-GonzaloNeural"  # 👈 Nueva voz añadida (Colombia)
+]
+DEFAULT_VOICE = "es-ES-ElviraNeural"
+
+OUTPUT_FOLDER = "output"
+PEXELS_API_KEY = "TU_API_KEY_AQUI"
+TAGS_PREDEFINIDOS = ["naturaleza", "ciudad", "personas", "tecnología", "viajes"]
+
+if not os.path.exists(OUTPUT_FOLDER):
+    os.makedirs(OUTPUT_FOLDER)
+
+# ==========================================
+# LIMPIEZA DE ARCHIVOS ANTIGUOS
+# ==========================================
+def clean_old_files(folder, max_age_hours=2):
+    now = time.time()
+    EXTENSIONS = (".mp4", ".mp3", ".wav", ".m4a", ".webm", ".avi", ".mov", ".flac")
+    for filename in os.listdir(folder):
+        file_path = os.path.join(folder, filename)
+        if os.path.isfile(file_path) and file_path.lower().endswith(EXTENSIONS):
+            file_age = now - os.path.getmtime(file_path)
+            if file_age > max_age_hours * 3600:
+                try:
+                    os.remove(file_path)
+                except Exception:
+                    pass
+
+clean_old_files(OUTPUT_FOLDER, max_age_hours=2)
+
+def auto_delete_file(path, delay_seconds=7200):
+    def delete():
+        time.sleep(delay_seconds)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+    threading.Thread(target=delete, daemon=True).start()
+
+# ==========================================
+# GENERADOR DE VOZ
+# ==========================================
+async def generate_voice(text, voice, output_path):
+    try:
+        start = time.time()
+        communicate = edge_tts.Communicate(text, voice)
+        await communicate.save(output_path)
+        logging.info(f"✅ Voz generada en {time.time()-start:.2f}s")
+        return os.path.exists(output_path)
+    except Exception:
+        return False
+
+# ==========================================
+# BÚSQUEDA Y DESCARGA DE VIDEOS
+# ==========================================
+def search_videos(tag, max_results=55):
+    start = time.time()
+    headers = {"Authorization": PEXELS_API_KEY}
+    params = {"query": tag, "per_page": max_results}
+    try:
+        response = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=10)
+        data = response.json()
+        urls = [video['video_files'][0]['link'] for video in data.get('videos', []) if video.get('video_files')]
+        logging.info(f"🔎 Búsqueda de videos '{tag}' en {time.time()-start:.2f}s ({len(urls)} resultados)")
+        return urls
+    except Exception:
+        return []
+
+def download_video(url, dir_path):
+    start = time.time()
+    try:
+        filename = os.path.join(dir_path, f"{datetime.now().timestamp()}.mp4")
+        r = requests.get(url, stream=True, timeout=30)
+        with open(filename, "wb") as f:
+            for chunk in r.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+        if os.path.getsize(filename) > 1000:
+            logging.info(f"⬇️ Video descargado en {time.time()-start:.2f}s")
+            return filename
+        else:
+            return None
+    except Exception:
+        return None
+
+def recode_video(input_path, output_path):
+    start = time.time()
+    subprocess.run([
+        "ffmpeg", "-y", "-i", input_path,
+        "-vf", "scale=1280:720,fps=30",
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-an",
+        output_path
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logging.info(f"🎞️ Video recodificado en {time.time()-start:.2f}s")
+
+# ==========================================
+# CREACIÓN DE MÚSICA CONTINUA
+# ==========================================
+def create_sequenced_music(music_files, total_duration, temp_dir):
+    start = time.time()
+    if not music_files:
+        return None
+    music_durs = []
+    valid_music_files = []
+    for mf in music_files:
+        if not os.path.exists(mf):
+            continue
+        result = subprocess.run([
+            "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+            "default=noprint_wrappers=1:nokey=1", mf
+        ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            dur = float(result.stdout.strip())
+            if dur > 0:
+                music_durs.append(dur)
+                valid_music_files.append(mf)
+        except Exception:
+            continue
+    if not valid_music_files:
+        return None
+    cycle_dur = sum(music_durs)
+    if cycle_dur == 0:
+        return None
+    sequenced_list = []
+    current_dur = 0
+    while current_dur < total_duration:
+        for idx, mf in enumerate(valid_music_files):
+            sequenced_list.append(mf)
+            current_dur += music_durs[idx]
+            if current_dur >= total_duration:
+                break
+        if current_dur >= total_duration:
+            break
+    list_path = os.path.join(temp_dir, f"music_list_{uuid.uuid4()}.txt")
+    with open(list_path, "w") as f:
+        for sf in sequenced_list:
+            abs_path = os.path.abspath(sf).replace('\\', '/')
+            f.write(f"file '{abs_path}'\n")
+    concat_music = os.path.join(temp_dir, f"concat_music_{uuid.uuid4()}.mp3")
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+        "-c", "copy", concat_music
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists(concat_music) or os.path.getsize(concat_music) == 0:
+        return None
+    full_music = os.path.join(temp_dir, f"full_music_{uuid.uuid4()}.mp3")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", concat_music, "-t", str(total_duration),
+        "-c:a", "libmp3lame", "-b:a", "320k", full_music
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logging.info(f"🎵 Música secuenciada en {time.time()-start:.2f}s")
+    if not os.path.exists(full_music) or os.path.getsize(full_music) == 0:
+        return concat_music
+    return full_music
+
+# ==========================================
+# GENERACIÓN DE VOCES ALTERNADAS
+# ==========================================
+def split_text_safe(text, max_chars=3000):
+    parts = []
+    while text:
+        part = text[:max_chars]
+        if len(text) > max_chars:
+            cut = max(part.rfind('.'), part.rfind(' '))
+            if cut > 0:
+                part = part[:cut+1]
+        parts.append(part.strip())
+        text = text[len(part):].strip()
+    return parts
+
+async def generate_all_voices(parts, voices, temp_dir):
+    voice_paths = []
+    durations = []
+    for i, part in enumerate(parts):
+        start = time.time()
+        current_voice = voices[i % len(voices)]  # 👈 Rotación automática entre las 3 voces
+        voice_path = os.path.join(temp_dir, f"voice_part_{uuid.uuid4()}.mp3")
+        communicate = edge_tts.Communicate(part, current_voice)
+        await communicate.save(voice_path)
+        if not os.path.exists(voice_path):
+            raise RuntimeError("Error al generar voz")
+        audio = AudioSegment.from_file(voice_path)
+        durations.append(audio.duration_seconds)
+        voice_paths.append(voice_path)
+        logging.info(f"🗣️ Parte {i+1}/{len(parts)} voz generada en {time.time()-start:.2f}s ({current_voice})")
+    return voice_paths, durations
+
+# ==========================================
+# CREACIÓN DE VIDEO POR PARTES
+# ==========================================
+def create_video_part(voice_duration, temp_dir, tags):
+    start_total = time.time()
+    
+    all_video_urls = []
+    for tag in tags:
+        urls = search_videos(tag, max_results=25)
+        all_video_urls.extend(urls)
+    if not all_video_urls:
+        return None, "❌ No se encontraron clips válidos"
+    
+    video_files = []
+    total_video = 0
+    max_attempts = 20
+    attempts = 0
+    
+    while total_video < voice_duration and attempts < max_attempts:
+        attempts += 1
+        video_url = random.choice(all_video_urls)
+        video_file = download_video(video_url, temp_dir)
+        if not video_file:
+            continue
+            
+        recode_path = os.path.join(temp_dir, f"recode_{os.path.basename(video_file)}")
+        recode_video(video_file, recode_path)
+        
+        try:
+            result = subprocess.run([
+                "ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                "default=noprint_wrappers=1:nokey=1", recode_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            vid_duration = float(result.stdout.strip())
+        except Exception:
+            continue
+            
+        if total_video + vid_duration <= voice_duration:
+            video_files.append(recode_path)
+            total_video += vid_duration
+        else:
+            falta = voice_duration - total_video
+            if falta > 0.5:
+                recortado = os.path.join(temp_dir, f"recorte_{os.path.basename(recode_path)}")
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", recode_path, "-t", str(falta),
+                    "-c:v", "libx264", "-preset", "veryfast", "-an", recortado
+                ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                video_files.append(recortado)
+            break
+            
+    if not video_files:
+        return None, "❌ No se pudieron descargar videos"
+        
+    list_path = os.path.join(temp_dir, f"list_{uuid.uuid4()}.txt")
+    with open(list_path, "w") as f:
+        for vf in video_files:
+            abs_path = os.path.abspath(vf).replace('\\', '/')
+            f.write(f"file '{abs_path}'\n")
+            
+    concat_video = os.path.join(temp_dir, f"concat_{uuid.uuid4()}.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+        "-c:v", "libx264", "-preset", "veryfast", "-an", concat_video
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    if not os.path.exists(concat_video):
+        return None, "❌ Fallo en concatenación de videos"
+        
+    logging.info(f"🎬 Parte de video creada en {time.time()-start_total:.2f}s")
+    return concat_video, None
+
+# ==========================================
+# CREACIÓN COMPLETA DE VIDEO
+# ==========================================
+def create_video_ffmpeg(text, voice, music_files=None):
+    start_total = time.time()
+    if music_files is None:
+        music_files = []
+    temp_dir = tempfile.mkdtemp()
+    try:
+        parts = split_text_safe(text, max_chars=3000)
+        if not parts:
+            return None, "❌ No se proporcionó texto válido"
+        
+        # 🔊 Generar todas las voces con las 3 configuradas
+        voice_paths, durations = asyncio.run(
+            generate_all_voices(parts, VOICE_LIST, temp_dir)
+        )
+
+        total_duration = sum(durations)
+        fade_duration = 3
+        extra_seconds = 5
+        total_duration_with_extras = total_duration + extra_seconds + fade_duration
+        
+        full_music = None
+        if music_files:
+            existing_music = [mf for mf in music_files if os.path.exists(mf)]
+            if existing_music:
+                full_music = create_sequenced_music(existing_music, total_duration_with_extras, temp_dir)
+        
+        part_videos = []
+        for i in range(len(parts)):
+            tags = TAGS_PREDEFINIDOS[i::len(parts)]
+            if not tags:
+                tags = TAGS_PREDEFINIDOS[:5]
+            video_path, error = create_video_part(durations[i], temp_dir, tags)
+            if not video_path:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return None, error
+            part_videos.append(video_path)
+        
+        list_path = os.path.join(temp_dir, f"list_final_{uuid.uuid4()}.txt")
+        with open(list_path, "w") as f:
+            for vf in part_videos:
+                abs_path = os.path.abspath(vf).replace('\\', '/')
+                f.write(f"file '{abs_path}'\n")
+        
+        video_concat = os.path.join(temp_dir, f"video_concat_{uuid.uuid4()}.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_path,
+            "-c:v", "libx264", "-preset", "veryfast", "-an", video_concat
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        if not os.path.exists(video_concat):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None, "❌ Fallo al concatenar videos"
+        
+        voices_concat = os.path.join(temp_dir, f"voices_concat_{uuid.uuid4()}.mp3")
+        voices_list_path = os.path.join(temp_dir, f"voices_list_{uuid.uuid4()}.txt")
+        with open(voices_list_path, "w") as f:
+            for vp in voice_paths:
+                abs_path = os.path.abspath(vp).replace('\\', '/')
+                f.write(f"file '{abs_path}'\n")
+        
+        subprocess.run([
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", voices_list_path,
+            "-c:a", "libmp3lame", "-b:a", "320k", voices_concat
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        video_extended = os.path.join(temp_dir, f"video_extended_{uuid.uuid4()}.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", video_concat,
+            "-vf", f"tpad=stop_mode=clone:stop_duration={extra_seconds + fade_duration}",
+            "-c:v", "libx264", "-preset", "veryfast", "-an",
+            video_extended
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        fade_start_audio = total_duration + extra_seconds
+        
+        if full_music and os.path.exists(full_music):
+            mixed_audio = os.path.join(temp_dir, f"mixed_audio_{uuid.uuid4()}.mp3")
+            subprocess.run([
+                "ffmpeg", "-y", "-i", voices_concat, "-i", full_music,
+                "-filter_complex",
+                f"[0:a]volume=3.5,apad=pad_dur={extra_seconds + fade_duration}[voice];"
+                f"[1:a]volume=0.13[music];"
+                f"[voice][music]amix=inputs=2:duration=longest[aout]",
+                "-map", "[aout]", "-t", str(total_duration_with_extras),
+                "-c:a", "libmp3lame", "-b:a", "320k", mixed_audio
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            mixed_audio = os.path.join(temp_dir, f"mixed_audio_{uuid.uuid4()}.mp3")
+            subprocess.run([
+                "ffmpeg", "-y", "-i", voices_concat,
+                "-af", f"volume=3.5,apad=pad_dur={extra_seconds + fade_duration}",
+                "-t", str(total_duration_with_extras),
+                "-c:a", "libmp3lame", "-b:a", "320k", mixed_audio
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        final_path = os.path.join(OUTPUT_FOLDER, f"video_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4")
+        
+        video_with_fade = os.path.join(temp_dir, f"video_fade_{uuid.uuid4()}.mp4")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", video_extended,
+            "-vf", f"fade=t=out:st={fade_start_audio}:d={fade_duration}",
+            "-c:v", "libx264", "-preset", "veryfast", "-an",
+            video_with_fade
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        audio_with_fade = os.path.join(temp_dir, f"audio_fade_{uuid.uuid4()}.mp3")
+        subprocess.run([
+            "ffmpeg", "-y", "-i", mixed_audio,
+            "-af", f"afade=t=out:st={fade_start_audio}:d={fade_duration}",
+            "-c:a", "libmp3lame", "-b:a", "320k", audio_with_fade
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        subprocess.run([
+            "ffmpeg", "-y", "-i", video_with_fade, "-i", audio_with_fade,
+            "-c:v", "copy", "-c:a", "aac", "-b:a", "320k",
+            "-shortest", final_path
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        
+        auto_delete_file(final_path, delay_seconds=7200)
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logging.info(f"🏁 Video final creado en {time.time()-start_total:.2f}s")
+        return final_path, None
+        
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        logging.error(f"Error en create_video_ffmpeg: {str(e)}")
+        return None, f"❌ Error inesperado: {e}"
+
+# ==========================================
+# FLASK APP
+# ==========================================
+app = Flask(__name__)
+jobs = {}
+
+def background_video_job(job_id, text, voice, music_files):
+    try:
+        video_path, error = create_video_ffmpeg(text, voice, music_files)
+        if video_path:
+            jobs[job_id]['status'] = 'done'
+            jobs[job_id]['file'] = video_path
+        else:
+            jobs[job_id]['status'] = 'error'
+            jobs[job_id]['error'] = error or "Error desconocido"
+    except Exception as e:
+        jobs[job_id]['status'] = 'error'
+        jobs[job_id]['error'] = f"Error en procesamiento: {str(e)}"
+
+@app.route("/", methods=["GET", "POST"])
+def index():
+    if request.method == "POST":
+        text = request.form.get("text")
+        voice = request.form.get("voice", DEFAULT_VOICE)
+        music1 = request.files.get("music1")
+        music2 = request.files.get("music2")
+        music3 = request.files.get("music3")
+        if not text or not text.strip():
+            return "Error: Se requiere texto", 400
+        job_id = str(uuid.uuid4())
+        music_files = []
+        for i, m in enumerate([music1, music2, music3], start=1):
+            if m and m.filename:
+                temp_music_path = os.path.join(OUTPUT_FOLDER, f"music_{job_id}_{i}.mp3")
+                m.save(temp_music_path)
+                music_files.append(temp_music_path)
+        jobs[job_id] = {"status": "processing"}
+        thread = threading.Thread(target=background_video_job, args=(job_id, text, voice, music_files))
+        thread.start()
+        return redirect(url_for("status", job_id=job_id))
+    
+    # Mostrar voces con nombres amigables
+    voices_friendly = {
+        "es-ES-ElviraNeural": "Elvira (España)",
+        "es-AR-TomasNeural": "Tomás (Argentina)",
+        "es-CO-GonzaloNeural": "Gonzalo (Colombia)"
+    }
+    voices_options = "".join([
+        f"<option value='{v}'>{voices_friendly.get(v, v)}</option>"
+        for v in VOICE_LIST
+    ])
+
+    return render_template_string('''
+        <h1>Generador de Videos</h1>
+        <form method="post" enctype="multipart/form-data">
+            <textarea name="text" rows="10" cols="60" placeholder="Ingrese el texto aquí"></textarea><br>
+            <label for="voice">Selecciona voz:</label>
+            <select name="voice">{{ voices_options|safe }}</select><br><br>
+            <label for="music1">Música 1:</label><input type="file" name="music1"><br>
+            <label for="music2">Música 2:</label><input type="file" name="music2"><br>
+            <label for="music3">Música 3:</label><input type="file" name="music3"><br><br>
+            <button type="submit">Generar Video</button>
+        </form>
+    ''', voices_options=voices_options)
+
+@app.route("/status/<job_id>")
+def status(job_id):
+    job = jobs.get(job_id)
+    if not job:
+        return "Trabajo no encontrado", 404
+    if job['status'] == 'processing':
+        return f'''
+        <html>
+        <head><meta http-equiv="refresh" content="5"></head>
+        <body>
+            <h2>🔄 Procesando video...</h2>
+            <p>Trabajo ID: {job_id}</p>
+            <p>Esta página se actualizará automáticamente cada 5 segundos.</p>
+        </body>
+        </html>
+        '''
+    elif job['status'] == 'done':
+        filename = os.path.basename(job['file'])
+        return f'''
+        <html>
+        <body>
+            <h2>✅ ¡Video listo!</h2>
+            <p><strong>Archivo:</strong> {filename}</p>
+            <p><strong>Trabajo ID:</strong> {job_id}</p>
+            <br>
+            <a href="/download/{job_id}" style="font-size: 24px; color: green; text-decoration: none; font-weight: bold;">
+            🎬 DESCARGAR VIDEO AQUÍ 🎬
+            </a>
+            <br><br>
+            <a href="/">⬅️ Generar otro video</a>
+        </body>
+        </html>
+        '''
+    else:
+        return f'''
+        <html>
+        <body>
+            <h2>❌ Error</h2>
+            <p><strong>Trabajo ID:</strong> {job_id}</p>
+            <p><strong>Error:</strong> {job.get('error', 'Desconocido')}</p>
+            <br>
+            <a href="/">⬅️ Volver a intentar</a>
+        </body>
+        </html>
+        '''
+
+@app.route("/download/<job_id>")
+def download(job_id):
+    job = jobs.get(job_id)
+    if not job or not job.get('file'):
+        return "Archivo no encontrado", 404
+    file_path = job['file']
+    if not os.path.exists(file_path):
+        return "Archivo no encontrado", 404
+    return send_file(file_path, as_attachment=True)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=True)
