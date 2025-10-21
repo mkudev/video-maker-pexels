@@ -16,7 +16,28 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-PEXELS_API_KEY = "YOU API KEY"
+# ⬇️ AQUÍ PONES LA FUNCIÓN test_proxy_for_edge_tts()
+def test_proxy_for_edge_tts():
+    import requests
+    try:
+        r = requests.get('https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt', timeout=5)
+        proxies = [p.strip() for p in r.text.split('\n') if p.strip()]
+        
+        for proxy in proxies[:20]:
+            try:
+                test = edge_tts.Communicate("test", "es-ES-ElviraNeural")
+                test.proxy = f"http://{proxy}"
+                logging.info(f"✅ Proxy funcional: {proxy}")
+                return f"http://{proxy}"
+            except:
+                continue
+        return None
+    except:
+        return None
+
+# ⬆️ HASTA AQUÍ
+
+PEXELS_API_KEY = "ozip4Y9oCD9NmW6THUwT9nQ9sPcn1du9loe6OS7NCkS78WB8Nn6wfUa3"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
@@ -193,15 +214,21 @@ def split_text_safe(text, max_chars=3000):
         parts.append(part.strip())
         text = text[len(part):].strip()
     return parts
-
 async def generate_all_voices(parts, voices, temp_dir):
     voice_paths = []
     durations = []
+    
+    working_proxy = test_proxy_for_edge_tts()
+    
     for i, part in enumerate(parts):
         start = time.time()
-        current_voice = voices[i % len(voices)]  # 👈 Rotación automática entre las 3 voces
+        current_voice = voices[i % len(voices)]
         voice_path = os.path.join(temp_dir, f"voice_part_{uuid.uuid4()}.mp3")
         communicate = edge_tts.Communicate(part, current_voice)
+        
+        if working_proxy:
+            communicate.proxy = working_proxy
+            
         await communicate.save(voice_path)
         if not os.path.exists(voice_path):
             raise RuntimeError("Error al generar voz")
