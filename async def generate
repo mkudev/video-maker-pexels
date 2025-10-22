@@ -16,7 +16,7 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-PEXELS_API_KEY = "ozip4Y9oCD9NmW6THUwT9nQ9sPcn1du9loe6OS7NCkS78WB8Nn6wfUa3"
+PEXELS_API_KEY = "PEXELS API KEY"
 OUTPUT_FOLDER = "outputs"
 os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
